@@ -1,0 +1,36 @@
+[
+  {
+    "id": "rail-battery", "title": "铁路携带充电宝", "topic": "rail_battery",
+    "keywords": ["高铁", "火车", "铁路", "充电宝", "锂电池"],
+    "content": "铁路安检目录要求携带的充电宝和锂电池有清楚标识，每块的额定能量上限为100瓦时。出发前仍应确认车站临时规定；电动轮椅所用电池适用例外。",
+    "url": "https://www.12306.cn/mormhweb/mobile_zxdt/202206/t20220617_37625.html",
+    "effective": "2022-07-01", "reviewed": "2026-09-14", "official": true
+  },
+  {
+    "id": "rail-security", "title": "铁路安检限制", "topic": "rail_security",
+    "keywords": ["高铁", "火车", "安检", "危险品", "枪支", "烟花"],
+    "content": "铁路安检目录区分禁止随身携带和托运、禁止随身携带但允许托运、限制携带三类物品。爆炸物等危险物品禁止带入。具体物品需对照官方目录，不能把航空限制直接套用到铁路。",
+    "url": "https://www.12306.cn/mormhweb/mobile_zxdt/202206/t20220617_37625.html",
+    "effective": "2022-07-01", "reviewed": "2026-09-14", "official": true
+  },
+  {
+    "id": "rail-refund", "title": "铁路退票办理入口", "topic": "rail_refund",
+    "keywords": ["高铁", "火车", "退票", "退票费", "车票"],
+    "content": "12306提供退票办理规则。费用会受退票距离开车的时间、是否改签等条件影响，请使用实际订单的退票试算和对应公告确认；本知识库不根据缺失的订单信息计算退款金额。",
+    "url": "https://kyfw.12306.cn/otn/gonggao/windowRefund.html",
+    "effective": "页面未标明", "reviewed": "2026-09-14", "official": true
+  },
+  {
+    "id": "flight-refund", "title": "机票退改签需核对承运人和票价条件", "topic": "flight_refund",
+    "keywords": ["飞机", "航空", "机票", "退改签", "退票"],
+    "content": "民航旅客服务规定涉及售票时的信息告知、客票变更和退款原则。办理退改签应核对承运人公布的运输条件和所购客票规则；仅凭出发地和目的地不能计算费用。",
+    "url": "https://www.caac.gov.cn/XWZX/MHYW/202103/t20210315_206802.html",
+    "effective": "2021-09-01", "reviewed": "2026-09-14", "official": true
+  },
+  {
+    "id": "bike-coverage", "title": "共享单车规则覆盖说明", "topic": "bike",
+    "keywords": ["共享单车", "骑车", "停放", "服务区", "单车规则"],
+    "content": "本原型没有接入共享单车运营商的实时库存和当地停放区规则。请在运营商客户端确认服务区、车辆可用性和停放要求；这里不提供通用于所有城市的政策结论。",
+    "url": "", "effective": "不适用", "reviewed": "2026-09-14", "official": false
+  }
+]

@@ -1,0 +1,21 @@
+services:
+  planner:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATA_MODE: ${DATA_MODE:-demo}
+      DATABASE_URL: sqlite:///data/travel.db
+      CHROMA_PATH: data/chroma
+      PROVIDER_URL: ${PROVIDER_URL:-}
+      PROVIDER_API_KEY: ${PROVIDER_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      API_ACCESS_TOKEN: ${API_ACCESS_TOKEN:-}
+      ENABLE_UI: ${ENABLE_UI:-true}
+    volumes:
+      - planner-data:/app/data
+    restart: unless-stopped
+volumes:
+  planner-data:

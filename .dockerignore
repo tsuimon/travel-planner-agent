@@ -1,0 +1,10 @@
+.venv
+.env
+.tools/
+mobile/android/build/
+dist/
+data
+.git
+__pycache__
+.pytest_cache
+.ruff_cache
