@@ -1,5 +1,9 @@
 # 多约束混合交通出行 Agent
 
+[![tests](https://github.com/tsuimon/travel-planner-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/tsuimon/travel-planner-agent/actions/workflows/ci.yml)
+
+项目地址：[github.com/tsuimon/travel-planner-agent](https://github.com/tsuimon/travel-planner-agent)
+
 将自然语言需求转换为结构化约束，用程序校验班次衔接、预算和交通方式，再输出可比较的混合出行方案。
 
 **定位：可运行、可测试的研究原型。** 未配置高德时使用合成交通演示；配置高德后，自然语言单程和多站请求查询真实地图路线，支持自动选择地铁下车换打车的站点。票务库存、天气仍需另接供应商；地图票价和打车估价不等于可预订报价，也不承诺全国覆盖或全局最优。

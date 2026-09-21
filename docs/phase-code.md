@@ -126,7 +126,7 @@ TOKEN_LIMIT=8000
 *.jks
 *.pem
 *.key
-data/
+/data/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -257,6 +257,10 @@ def configure_logging() -> None:
 
 ````text
 # 多约束混合交通出行 Agent
+
+[![tests](https://github.com/tsuimon/travel-planner-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/tsuimon/travel-planner-agent/actions/workflows/ci.yml)
+
+项目地址：[github.com/tsuimon/travel-planner-agent](https://github.com/tsuimon/travel-planner-agent)
 
 将自然语言需求转换为结构化约束，用程序校验班次衔接、预算和交通方式，再输出可比较的混合出行方案。
 

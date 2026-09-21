@@ -13,7 +13,7 @@
 *.jks
 *.pem
 *.key
-data/
+/data/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
