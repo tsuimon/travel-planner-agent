@@ -56,6 +56,7 @@ class RequestNodes:
         self.place_candidates: list[dict] = []
         self.intelligent: IntelligentPlanner | None = None
         self.pending_time_query: str | None = None
+        self.conversation = None
         self.stats = SearchStats(limit=service.settings.max_expansions, deadline=self.budget.deadline)
 
     def update(self, node: str, **values) -> AgentState:
@@ -86,6 +87,7 @@ class RequestNodes:
                 "itinerary_draft": self.itinerary.model_dump(mode="json") if self.itinerary else None,
                 "place_candidates": self.place_candidates,
                 "pending_time_query": self.pending_time_query,
+                "conversation": self.conversation.metadata() if self.conversation else None,
                 "intelligent_plan": self.intelligent.report.model_dump(mode="json")
                 if self.intelligent
                 else None,
@@ -94,6 +96,16 @@ class RequestNodes:
         ).model_dump(mode="json")
 
     async def parse_requirements(self, state: AgentState) -> AgentState:
+        if (
+            self.service.settings.conversation_agent
+            and self.service.llm.enabled
+            and not self.request.constraints
+            and not self.request.itinerary
+        ):
+            from src.agent.conversation import ConversationAgent
+
+            self.conversation = ConversationAgent(self)
+            return await self.conversation.run()
         query = normalize_time_text(self.request.message)
         prefs = self.service.repo.preferences()
         patch = preference_patch(query, prefs)
@@ -540,6 +552,8 @@ class RequestNodes:
         return self.update("generate_output", response=response)
 
     async def fallback(self, reason: str) -> dict:
+        if self.conversation:
+            return self.conversation.fallback(reason)
         self.error(reason)
         result = await self.generate_output(self.latest)
         return result["response"]

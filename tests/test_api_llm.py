@@ -39,8 +39,11 @@ def test_token_reservation_happens_before_call():
     budget = Budget(token_limit=300)
     reservation = budget.reserve("abc", 100)
     budget.reconcile(reservation, 10)
+    assert budget.used == 10
+    second = budget.reserve("second", 100)
     with pytest.raises(TokenLimit):
-        budget.reserve("second", 100)
+        budget.reserve("third", 100)
+    budget.reconcile(second, None)
     assert budget.used <= 300 and budget.actual == 10
 
 

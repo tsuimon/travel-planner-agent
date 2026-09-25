@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str = ""
     llm_extra_body: dict = Field(default_factory=dict)
+    conversation_agent: bool = True
     amap_api_key: SecretStr = SecretStr("")
     api_access_token: SecretStr = SecretStr("")
     enable_ui: bool = True

@@ -21,6 +21,9 @@ def service(tmp_path):
             chroma_path=str(tmp_path / "chroma"),
             enable_ui=False,
             tool_backoff=0,
+            # Existing parser/search regressions exercise the offline rule path.
+            # Model-led conversation tests explicitly enable the new controller.
+            conversation_agent=False,
         )
     )
     yield instance

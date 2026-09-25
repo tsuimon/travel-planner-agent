@@ -63,7 +63,7 @@ class LLMClient:
             **body,
             "max_tokens": max_tokens,
         }
-        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         cached = self.cache.get(serialized)
         if cached is not None:
             return cached

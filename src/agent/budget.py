@@ -34,4 +34,6 @@ class Budget:
     def reconcile(self, reservation: int, actual: int | None) -> None:
         if actual is not None:
             self.actual += actual
-            self.used += max(0, actual - reservation)
+            # Replace this request's reservation with provider-reported usage.
+            # Unknown/failed requests retain their full reservation.
+            self.used += actual - reservation

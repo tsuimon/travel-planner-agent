@@ -154,9 +154,25 @@ class ItineraryStop(Model):
     label: str = "到达"
     locations: list[str] = Field(default_factory=list, max_length=5)
     start_at: datetime | None = None
+    end_at: datetime | None = None
     duration_min: int | None = Field(None, ge=0, le=10080)
     requires_start_time: bool = False
     cost_cents: int | None = Field(None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_end(self) -> "ItineraryStop":
+        if self.end_at:
+            if not self.start_at:
+                raise ValueError("活动结束时间需要对应的开始时间")
+            if self.start_at.tzinfo is None or self.end_at.tzinfo is None:
+                raise ValueError("活动时间必须包含时区")
+            minutes = (self.end_at - self.start_at).total_seconds() / 60
+            if minutes < 0 or minutes > 10080 or minutes != int(minutes):
+                raise ValueError("活动开始和结束时间冲突")
+            if self.duration_min is not None and self.duration_min != int(minutes):
+                raise ValueError("活动时长与起止时间冲突")
+            self.duration_min = int(minutes)
+        return self
 
 
 class ItineraryDraft(Model):
