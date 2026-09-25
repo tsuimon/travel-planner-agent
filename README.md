@@ -35,6 +35,12 @@ flowchart LR
 
 技术栈：Python 3.10+（本机已验证3.12）、LangGraph、LangChain Core、Pydantic 2、SQLAlchemy 2、SQLite、Chroma、httpx、FastAPI、Gradio、pytest。
 
+## 界面预览
+
+![行间出行规划桌面界面](docs/images/interface-desktop.png)
+
+桌面端并排显示对话与方案，手机端自动切换为单列。支持快捷场景、行程时间轴、费用摘要、折叠偏好及请求失败后的重试。图片为演示模式界面，功能与数据边界见上文说明。
+
 ## 快速开始（Conda，3步）
 
 在 **Anaconda Prompt** 中进入本目录：

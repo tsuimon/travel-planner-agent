@@ -87,8 +87,16 @@ def create_app(settings: Settings | None = None, service: TravelService | None =
     if settings.enable_ui and not settings.api_access_token.get_secret_value():
         import gradio as gr
         from frontend.app import build_ui
+        from frontend.presentation import CSS_PATH, THEME
 
-        app = gr.mount_gradio_app(app, build_ui(lambda: app.state.service), path="/ui")
+        app = gr.mount_gradio_app(
+            app,
+            build_ui(lambda: app.state.service),
+            path="/ui",
+            theme=THEME,
+            css=CSS_PATH.read_text(encoding="utf-8"),
+            footer_links=[],
+        )
     return app
 
 

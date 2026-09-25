@@ -293,6 +293,12 @@ flowchart LR
 
 技术栈：Python 3.10+（本机已验证3.12）、LangGraph、LangChain Core、Pydantic 2、SQLAlchemy 2、SQLite、Chroma、httpx、FastAPI、Gradio、pytest。
 
+## 界面预览
+
+![行间出行规划桌面界面](docs/images/interface-desktop.png)
+
+桌面端并排显示对话与方案，手机端自动切换为单列。支持快捷场景、行程时间轴、费用摘要、折叠偏好及请求失败后的重试。图片为演示模式界面，功能与数据边界见上文说明。
+
 ## 快速开始（Conda，3步）
 
 在 **Anaconda Prompt** 中进入本目录：
@@ -5165,8 +5171,16 @@ def create_app(settings: Settings | None = None, service: TravelService | None =
     if settings.enable_ui and not settings.api_access_token.get_secret_value():
         import gradio as gr
         from frontend.app import build_ui
+        from frontend.presentation import CSS_PATH, THEME
 
-        app = gr.mount_gradio_app(app, build_ui(lambda: app.state.service), path="/ui")
+        app = gr.mount_gradio_app(
+            app,
+            build_ui(lambda: app.state.service),
+            path="/ui",
+            theme=THEME,
+            css=CSS_PATH.read_text(encoding="utf-8"),
+            footer_links=[],
+        )
     return app
 
 
@@ -5182,71 +5196,164 @@ app = create_app()
 ### `frontend/app.py`
 
 ````python
-"""Embedded Gradio UI, sharing the API's service and database."""
+"""Responsive Gradio workspace, sharing the API's service and database."""
 
+import logging
 from typing import Callable
 import gradio as gr
 from src.domain import ChatRequest, Mode, Preferences
 from src.risk import MODE_NAMES
-from frontend.cards import render_cards, render_intelligent
+from frontend.cards import render_cards, render_intelligent, notice
+from frontend.presentation import HEADER, HERO, WELCOME, EMPTY
+
+SCENARIOS = [
+    ("到点抵达 ↗", "明天从北京国家体育馆到北京大兴枣园地铁站，下午4点前到，预算100元，不要打车"),
+    ("夜间接驳 ↗", "明天晚上10点半从鸟巢出发，去北京印刷学院，先坐地铁然后打车，帮我选择下车站，尽量省钱"),
+    (
+        "多站安排 ↗",
+        "明天下午3点从北京大兴清源路出发，晚上7点半在天津奥体看演唱会，预计10点散场，吃一小时海底捞后去广州。交通预算500元，允许过夜，餐厅帮我选。",
+    ),
+]
+READY = "可以继续补充条件，我会保留本次对话中的行程信息。"
 
 
 def build_ui(get_service: Callable) -> gr.Blocks:
-    with gr.Blocks(title="混合交通出行规划") as ui:
-        gr.Markdown(
-            "# 混合交通出行规划\n告诉我出行要求，程序自动选择接驳站点、安排活动与交通，并给出推荐理由。"
-        )
-        connection = gr.Markdown()
+    with gr.Blocks(title="行间 · 智能出行规划", analytics_enabled=False, fill_width=True) as ui:
+        gr.HTML(HEADER, elem_id="trip-header")
+        gr.HTML(HERO, elem_id="trip-hero")
+        connection = gr.HTML(elem_id="trip-connection")
         session = gr.State(None)
-        with gr.Row():
-            with gr.Column(scale=3):
-                chat = gr.Chatbot(label="出行对话", height=460)
-                text = gr.Textbox(
-                    label="出行需求", placeholder="明天晚上从北京海淀到天津滨海新区，预算100以内，不要打车"
+        with gr.Row(elem_id="trip-workspace"):
+            with gr.Column(scale=7, min_width=320, elem_id="trip-conversation"):
+                gr.HTML(
+                    '<div class="trip-section-head"><h2>聊聊你的行程</h2><span>一句话，也可以开始</span></div>'
                 )
-                with gr.Row():
-                    submit = gr.Button("规划行程", variant="primary")
-                    reset = gr.Button("新对话")
-                gr.Examples(
-                    examples=[
-                        "2026年9月26日15点从北京大兴清源路出发，19点半在天津奥体看演唱会，预计22点散场，吃一小时海底捞后去广州。交通预算500元，允许过夜，餐厅帮我选。",
-                        "明天晚上从北京海淀到天津滨海新区，预算100以内，不要打车",
-                        "今天晚上10点半从鸟巢出发，去北京印刷学院，四号线赶不上了，先坐地铁，然后打车，给我花费最低的方案",
-                        "高铁能带充电宝吗",
-                    ],
-                    inputs=text,
+                chat = gr.Chatbot(
+                    label="出行对话",
+                    show_label=False,
+                    height=400,
+                    min_height=280,
+                    placeholder=WELCOME,
+                    buttons=["copy"],
+                    elem_id="trip-chat",
                 )
-            with gr.Column(scale=1):
-                gr.Markdown("### 长期偏好")
-                bike = gr.Radio(
-                    choices=[("不骑行", 0), ("短途骑行", 1), ("可以骑行", 2)], value=0, label="骑行接受度"
+                with gr.Row(elem_id="trip-scenarios"):
+                    examples = [gr.Button(label, size="sm") for label, _ in SCENARIOS]
+                with gr.Group(elem_id="trip-composer"):
+                    text = gr.Textbox(
+                        label="出行需求",
+                        show_label=False,
+                        lines=3,
+                        max_lines=6,
+                        placeholder="从哪里出发？什么时候到？\n例如：明天下午4点到天津，预算100元，不要打车。",
+                        elem_id="trip-input",
+                    )
+                    with gr.Row(elem_id="trip-actions"):
+                        reset = gr.Button("开启新行程", scale=1, min_width=100, elem_id="trip-reset")
+                        submit = gr.Button("开始规划  →", variant="primary", scale=2, elem_id="trip-submit")
+                status = gr.Markdown(READY, elem_id="trip-status")
+                with gr.Accordion(
+                    "出行偏好 · 为下次规划记住你的习惯", open=False, elem_id="trip-preferences"
+                ):
+                    bike = gr.Radio(
+                        [("不骑行", 0), ("短途骑行", 1), ("可以骑行", 2)], value=0, label="骑行接受度"
+                    )
+                    transfer = gr.Slider(
+                        0,
+                        3,
+                        value=2,
+                        step=1,
+                        label="换乘接受度",
+                        info="0 最少 → 3 较多；硬上限请在对话中说明",
+                    )
+                    economy = gr.Radio(
+                        [("综合考虑", "balanced"), ("省钱优先", "economy"), ("省时优先", "fast")],
+                        value="balanced",
+                        label="更看重什么",
+                    )
+                    excluded = gr.CheckboxGroup(
+                        [(MODE_NAMES[m.value], m.value) for m in Mode], label="不考虑的交通方式"
+                    )
+                    save = gr.Button("保存出行偏好", size="sm")
+                    saved = gr.Markdown()
+            with gr.Column(scale=5, min_width=300, elem_id="trip-results"):
+                gr.HTML(
+                    '<div class="trip-section-head"><h2>行程方案</h2><span>时间 · 费用 · 每一段路</span></div>'
                 )
-                transfer = gr.Slider(0, 3, value=2, step=1, label="换乘容忍度（软偏好）")
-                economy = gr.Dropdown(
-                    [("综合", "balanced"), ("省钱", "economy"), ("省时", "fast")],
-                    value="balanced",
-                    label="排序偏好",
-                )
-                excluded = gr.CheckboxGroup([(MODE_NAMES[m.value], m.value) for m in Mode], label="禁用方式")
-                save = gr.Button("保存偏好")
-                saved = gr.Markdown()
-        cards = gr.HTML(label="方案对比")
-        with gr.Accordion("结构化结果与数据来源", open=False):
-            details = gr.JSON(label="方案详情与数据来源")
+                cards = gr.HTML(EMPTY, elem_id="trip-cards")
+                with gr.Accordion("数据来源与详细结果", open=False, elem_id="trip-details"):
+                    details = gr.JSON(label="完整规划结果")
+        gr.HTML('<p class="trip-footer">路线与费用为参考测算。出发前请核实班次、余票及当天运营情况。</p>')
 
         async def respond(message, history, sid):
             if not message or not message.strip():
-                return history, sid, {}, message, ""
-            result = await get_service().chat(ChatRequest(message=message, session_id=sid))
-            updated = [
-                *(history or []),
-                {"role": "user", "content": message},
-                {"role": "assistant", "content": result.answer},
-            ]
-            cards_html = render_cards(result.plans) + render_intelligent(
-                result.metadata.get("intelligent_plan")
+                yield (
+                    gr.skip(),
+                    gr.skip(),
+                    gr.skip(),
+                    gr.skip(),
+                    gr.skip(),
+                    "先写下你的出发地和目的地吧。",
+                    gr.skip(),
+                    gr.skip(),
+                    *(gr.skip() for _ in examples),
+                )
+                return
+            conversation = [*(history or []), {"role": "user", "content": message.strip()}]
+            yield (
+                conversation,
+                sid,
+                gr.skip(),
+                gr.update(value="", interactive=False),
+                gr.skip(),
+                "正在理解需求、查询路线并检查衔接，请稍候…",
+                gr.update(value="正在规划…", interactive=False),
+                gr.update(interactive=False),
+                *(gr.update(interactive=False) for _ in examples),
             )
-            return updated, result.session_id, result.model_dump(mode="json"), "", cards_html
+            try:
+                result = await get_service().chat(ChatRequest(message=message.strip(), session_id=sid))
+                html = render_cards(result.plans) + render_intelligent(
+                    result.metadata.get("intelligent_plan")
+                )
+                if not html:
+                    html = notice(
+                        "需要补充一些信息" if result.status == "clarification" else "本轮回复已更新",
+                        ["查看对话中的说明，补充条件后可以继续规划。"],
+                    )
+                conversation.append({"role": "assistant", "content": result.answer})
+                hint = (
+                    "请在对话中补充信息，我会接着规划。"
+                    if result.status == "clarification"
+                    else "本轮规划已更新 · 可以继续修改时间、预算或交通方式。"
+                )
+                yield (
+                    conversation,
+                    result.session_id,
+                    result.model_dump(mode="json"),
+                    gr.update(value="", interactive=True),
+                    html,
+                    hint,
+                    gr.update(value="继续规划  →", interactive=True),
+                    gr.update(interactive=True),
+                    *(gr.update(interactive=True) for _ in examples),
+                )
+            except Exception:
+                logging.getLogger("travel.ui").exception("ui_request_failed")
+                conversation.append(
+                    {"role": "assistant", "content": "本次请求未能完成。你的输入已保留，请稍后重试。"}
+                )
+                yield (
+                    conversation,
+                    sid,
+                    gr.skip(),
+                    gr.update(value=message, interactive=True),
+                    gr.skip(),
+                    "暂时未能完成规划，可以重试。",
+                    gr.update(value="重新规划  →", interactive=True),
+                    gr.update(interactive=True),
+                    *(gr.update(interactive=True) for _ in examples),
+                )
 
         def persist(b, t, e, x):
             current = get_service().repo.preferences().model_dump()
@@ -5260,7 +5367,7 @@ def build_ui(get_service: Callable) -> gr.Blocks:
                 }
             )
             get_service().repo.save_preferences(value)
-            return "已保存，下次规划自动应用。"
+            return "✓ 已保存，下次规划自动应用。"
 
         def load_prefs():
             p = get_service().repo.preferences()
@@ -5271,21 +5378,36 @@ def build_ui(get_service: Callable) -> gr.Blocks:
                 [m.value for m in p.excluded_modes],
             )
 
-        submit.click(
-            respond, [text, chat, session], [chat, session, details, text, cards], concurrency_limit=4
-        )
-        text.submit(
-            respond, [text, chat, session], [chat, session, details, text, cards], concurrency_limit=4
-        )
+        outputs = [chat, session, details, text, cards, status, submit, reset, *examples]
+        for event in (submit.click, text.submit):
+            event(
+                respond,
+                [text, chat, session],
+                outputs,
+                concurrency_limit=1,
+                concurrency_id="trip-planning",
+                trigger_mode="once",
+                show_progress="hidden",
+            )
+        for button, (_, example) in zip(examples, SCENARIOS):
+            button.click(lambda value=example: value, outputs=text, queue=False)
         save.click(persist, [bike, transfer, economy, excluded], saved)
-        reset.click(lambda: ([], None, {}, ""), outputs=[chat, session, details, cards])
+        reset.click(
+            lambda: ([], None, {}, "", EMPTY, READY, gr.update(value="开始规划  →")),
+            outputs=[chat, session, details, text, cards, status, submit],
+            queue=False,
+        )
         ui.load(load_prefs, outputs=[bike, transfer, economy, excluded])
 
         def connection_status():
-            settings = get_service().settings
-            if settings.amap_api_key.get_secret_value():
-                return "**已连接高德：支持真实地点查询和地铁转打车的自动选站。** 打车为参考估价；车票价格与余票仍需售票方核验。"
-            return "**当前为演示数据。** 配置高德后可启用复杂行程的真实路线比较。"
+            connected = bool(get_service().settings.amap_api_key.get_secret_value())
+            title = "已连接高德地图" if connected else "演示模式"
+            detail = (
+                "支持真实地点与交通路线查询，价格与余票仍需核验。"
+                if connected
+                else "使用合成路线体验规划；配置高德后可查询真实地点。"
+            )
+            return f'<div class="trip-connection"><span class="trip-dot"></span><span><strong>{title}</strong> · {detail}</span></div>'
 
         ui.load(connection_status, outputs=connection)
     return ui
@@ -5294,7 +5416,7 @@ def build_ui(get_service: Callable) -> gr.Blocks:
 ### `frontend/cards.py`
 
 ````python
-"""Escaped, compact plan cards for the Gradio results pane."""
+"""Accessible, escaped route summaries shared by desktop and mobile."""
 
 from html import escape
 from src.domain import Plan
@@ -5302,79 +5424,287 @@ from src.risk import MODE_NAMES
 from src.agent.intelligent import PlanningReport, display_options
 
 
+def duration(minutes: float) -> str:
+    value = max(0, round(minutes))
+    hours, rest = divmod(value, 60)
+    return f"{hours}小时{rest}分" if hours and rest else (f"{hours}小时" if hours else f"{rest}分钟")
+
+
+def notice(title: str, lines: list[str]) -> str:
+    return (
+        f'<div class="trip-notice" role="status"><h3>{escape(title)}</h3><ul>'
+        + "".join(f"<li>{escape(line)}</li>" for line in lines)
+        + "</ul></div>"
+    )
+
+
+def metrics(cost: int, minutes: float, transfers: int, *, estimate: bool = False) -> str:
+    label = "已知交通费用" if estimate else "交通参考费用"
+    return (
+        f'<div class="trip-metrics"><div><small>{label}</small><strong class="trip-price">¥{cost / 100:.2f}</strong></div>'
+        f"<div><small>全程用时</small><strong>{duration(minutes)}</strong></div>"
+        f"<div><small>换乘次数</small><strong>{transfers} 次</strong></div></div>"
+    )
+
+
+def notes_detail(notes: list[str]) -> str:
+    unique = list(dict.fromkeys(n for n in notes if n))
+    if not unique:
+        return ""
+    return (
+        "<details><summary>查看测算条件与数据说明</summary><ul>"
+        + "".join(f"<li>{escape(n)}</li>" for n in unique)
+        + "</ul></details>"
+    )
+
+
 def render_cards(plans: list[Plan]) -> str:
     if not plans:
         return ""
     cards = []
-    for plan in plans:
+    for index, plan in enumerate(plans):
         legs = "".join(
-            f'<li style="margin:10px 0"><strong>{leg.departure:%H:%M} → {leg.arrival:%H:%M}</strong>'
-            f"<br>{escape(leg.origin_name)} → {escape(leg.destination_name)}"
-            f"<br><small>{escape(MODE_NAMES[leg.mode.value])} · ¥{leg.cost_cents / 100:.2f}</small></li>"
+            f'<li><span class="trip-time">{leg.departure:%m-%d %H:%M} → {leg.arrival:%m-%d %H:%M}</span>'
+            f'<strong class="trip-route">{escape(leg.origin_name)} → {escape(leg.destination_name)}</strong>'
+            f'<span class="trip-service">{escape(MODE_NAMES[leg.mode.value])} · ¥{leg.cost_cents / 100:.2f}</span></li>'
             for leg in plan.legs
         )
-        risks = "".join(f"<li>{escape(r)}</li>" for r in plan.risks)
         activities = "".join(
-            f"<li>{a.start:%m-%d %H:%M}—{a.end:%H:%M} {escape(a.location)} · {escape(a.label)}</li>"
+            f'<div class="trip-activity">{escape(a.label)} · {escape(a.location)} {a.start:%m-%d %H:%M}—{a.end:%m-%d %H:%M}</div>'
             for a in plan.activities
         )
-        cards.append(
-            f'<article style="flex:1;min-width:260px;border:1px solid #cbd5e1;border-radius:14px;'
-            f'padding:20px;background:#f8fafc;color:#172033">'
-            f'<h3 style="margin:0;color:#0f766e">{escape(plan.label)}</h3>'
-            f'<p style="font-size:28px;font-weight:700;margin:12px 0">¥{plan.total_cost_cents / 100:.2f}</p>'
-            f"<p>{plan.total_minutes:g} 分钟 · {plan.transfers} 次换乘</p>"
-            f'<ol style="padding-left:20px">{legs}</ol>'
-            f'<ul style="padding-left:20px">{activities}</ul>'
-            f'<details><summary>数据与执行风险</summary><ul style="padding-left:20px">{risks}</ul></details>'
-            f"</article>"
+        status = (
+            "演示数据 · 非实际可预订路线" if any(leg.demo for leg in plan.legs) else "请出发前核实班次与费用"
         )
-    return (
-        '<section aria-label="方案对比" style="display:flex;gap:16px;flex-wrap:wrap">'
-        + "".join(cards)
-        + "</section>"
-    )
+        cards.append(
+            '<article class="trip-card">'
+            f'<div class="trip-card-heading"><h3>{escape(plan.label)}方案</h3><span class="trip-badge">{index + 1:02d}</span></div>'
+            f'<div class="trip-card-status">{status}</div>'
+            + metrics(plan.total_cost_cents, plan.total_minutes, plan.transfers)
+            + f'<details {"open" if index == 0 else ""}><summary>行程时间轴</summary><ol class="trip-timeline">{legs}</ol>{activities}</details>'
+            + notes_detail(plan.risks)
+            + "</article>"
+        )
+    return '<section class="trip-card-grid" aria-label="方案对比">' + "".join(cards) + "</section>"
 
 
 def render_intelligent(value: dict | None) -> str:
-    """Show whole-trip progress and active choices, not empty cards for partial results."""
+    """Retain incomplete-cost and partial-itinerary warnings alongside compact summaries."""
     if not value:
         return ""
     report = PlanningReport.model_validate(value)
     if not report.options:
-        return ""
+        return notice(
+            "再补充一点，就能继续" if report.questions else "暂未找到合适的路线",
+            report.questions or report.data_gaps or ["可在对话中补充时间、调整预算或交通方式后继续规划。"],
+        )
     parts = []
     for index, option in enumerate(display_options(report)):
+        complete = report.completed_stops == report.total_stops
         status = (
-            "全程候选 · 票价与余票待核验"
-            if report.completed_stops == report.total_stops
-            else f"已算出前{report.completed_stops}/{report.total_stops}站 · 后续待解决"
+            "全程候选 · 班次、票价与余票待核验"
+            if complete
+            else f"已完成 {report.completed_stops}/{report.total_stops} 站 · 后续待解决"
         )
-        title = f"候选{index + 1}"
-        if report.metro_then_taxi:
-            taxi = next(s for s in reversed(option.routes[-1].steps) if s.mode.value == "taxi")
-            title = f"推荐：{taxi.origin}下车再打车"
-            status = "已检查地铁末班衔接 · 打车价格为估算"
+        title = f"路线 {index + 1:02d}"
+        if report.metro_then_taxi and option.routes:
+            taxi = next((s for s in reversed(option.routes[-1].steps) if s.mode.value == "taxi"), None)
+            if taxi:
+                title = f"{taxi.origin}下车，再打车"
+                status = "已检查地铁末班衔接 · 打车价格为估算"
         timeline = []
-        for route, activity in zip(option.routes, option.activities):
+        for route_index, route in enumerate(option.routes):
             services = " → ".join(s.name for s in route.steps if s.mode.value != "walk") or "步行"
-            timeline.append(
-                f"<li><strong>{escape(route.origin)} → {escape(route.destination)}</strong>"
-                f"<br>{route.departure:%m-%d %H:%M}—{route.arrival:%m-%d %H:%M}"
-                f"<br>{escape(services)}<br>{escape(activity.label)}至 {activity.end:%m-%d %H:%M}</li>"
+            activity = option.activities[route_index] if route_index < len(option.activities) else None
+            activity_html = (
+                f'<div class="trip-activity">{escape(activity.label)} · {activity.start:%m-%d %H:%M}—{activity.end:%m-%d %H:%M}</div>'
+                if activity and activity.end > activity.start
+                else ""
             )
-        notes = "；".join(dict.fromkeys(option.decisions))
-        incomplete = "（费用不完整）" if option.unknown_cost else ""
-        parts.append(
-            f'<article style="flex:1;min-width:280px;padding:20px;border:1px solid #b8d9d1;border-radius:14px;background:#f5faf8;color:#163a32">'
-            f"<h3>{escape(title)} · 交通参考¥{option.transport_cents / 100:.2f}{incomplete}</h3>"
-            f"<p>{status}</p><ol>{''.join(timeline)}</ol><p>{escape(notes)}</p></article>"
+            timeline.append(
+                f'<li><span class="trip-time">{route.departure:%m-%d %H:%M} → {route.arrival:%m-%d %H:%M}</span>'
+                f'<strong class="trip-route">{escape(route.origin)} → {escape(route.destination)}</strong>'
+                f'<span class="trip-service">{escape(services)}</span>{activity_html}</li>'
+            )
+        minutes = (option.ready - option.routes[0].departure).total_seconds() / 60 if option.routes else 0
+        rides = [s for r in option.routes for s in r.steps if s.mode.value not in {"walk", "shared_bike"}]
+        warning = (
+            '<div class="trip-warning">另有未核实费用，暂不能确认满足预算。</div>'
+            if option.unknown_cost
+            else ""
         )
-    return (
-        '<section aria-label="智能规划对比" style="display:flex;gap:16px;flex-wrap:wrap">'
-        + "".join(parts)
-        + "</section>"
-    )
+        if not complete:
+            warning += '<div class="trip-warning">以下为已算出的部分行程，不是完整可执行方案。</div>'
+        notes = [*option.decisions, *report.assumptions, *report.data_gaps]
+        notes += [w for route in option.routes for w in route.warnings]
+        parts.append(
+            '<article class="trip-card">'
+            f'<div class="trip-card-heading"><h3>{escape(title)}</h3><span class="trip-badge">候选 {index + 1}</span></div>'
+            f'<div class="trip-card-status">{escape(status)}</div>'
+            + metrics(option.transport_cents, minutes, max(0, len(rides) - 1), estimate=option.unknown_cost)
+            + warning
+            + f'<details {"open" if index == 0 else ""}><summary>行程时间轴</summary><ol class="trip-timeline">{"".join(timeline)}</ol></details>'
+            + notes_detail(notes)
+            + "</article>"
+        )
+    return '<section class="trip-card-grid" aria-label="智能规划对比">' + "".join(parts) + "</section>"
+````
+
+### `frontend/presentation.py`
+
+````python
+"""Local visual assets and Gradio theme configuration."""
+
+from pathlib import Path
+import gradio as gr
+
+CSS_PATH = Path(__file__).with_name("styles.css")
+THEME = gr.themes.Soft(
+    primary_hue="emerald",
+    secondary_hue="teal",
+    neutral_hue="slate",
+    font=["Segoe UI", "Microsoft YaHei", "sans-serif"],
+    font_mono=["Consolas", "monospace"],
+)
+
+COMPASS = """<svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/>
+<path d="m16 8-2.5 5.5L8 16l2.5-5.5L16 8Z" fill="currentColor"/></svg>"""
+HEADER = f"""<header class="trip-nav"><div class="trip-brand"><span class="trip-logo">{COMPASS}</span>
+行间<span style="font-size:11px;font-weight:400;letter-spacing:2px">出行规划</span></div>
+<span class="trip-nav-note">每一段路，都有安排</span></header>"""
+HERO = """<div class="trip-hero"><div class="trip-eyebrow">YOUR NEXT JOURNEY</div>
+<h1>把复杂行程，安排明白。</h1><p>说说你要去哪里、几点到，还有那些不能将就的要求。</p></div>"""
+WELCOME = f"""<div class="trip-welcome"><div class="trip-welcome-icon">{COMPASS}</div>
+<h3>这次，想怎么出发？</h3><p>赶一场演唱会，接上最后一班地铁，<br>或在预算内安排一趟跨城旅行。<br>把需求告诉我，我们一起把路线理清。</p>
+<div class="trip-welcome-tags"><span>多站行程</span><span>到达时间倒推</span><span>夜间接驳</span></div></div>"""
+EMPTY = """<div class="trip-empty"><div class="trip-empty-art">
+<svg width="240" height="110" viewBox="0 0 240 110" fill="none" aria-hidden="true">
+<path d="M18 80H68Q95 80 95 52V45Q95 25 125 25H166Q188 25 188 53V62Q188 80 220 80" stroke="#afc7b3" stroke-width="2" stroke-dasharray="5 6"/>
+<circle cx="18" cy="80" r="8" fill="#eaf3e7" stroke="#588568" stroke-width="2"/>
+<circle cx="126" cy="25" r="6" fill="#739d7b"/>
+<path d="M220 57c-12 0-16 15 0 29 16-14 12-29 0-29Z" fill="#176651"/>
+<circle cx="220" cy="68" r="4" fill="#ecf3e9"/>
+<path d="m47 33 9-4 9 4-9 4-9-4Z" fill="#cad9bd"/>
+<path d="M153 72h15m-7-7v14" stroke="#becfb8" stroke-width="2"/>
+</svg></div><h3>你的行程，即将在这里展开</h3>
+<p>先聊聊目的地和时间。规划完成后，<br>在这里查看费用、接驳站点和每一段安排。</p>
+<div class="trip-empty-steps"><span><b>01 / 描述</b>说出出行需求</span><span><b>02 / 规划</b>检查时间与衔接</span><span><b>03 / 查看</b>选择合适的路线</span></div></div>"""
+````
+
+### `frontend/styles.css`
+
+````text
+/* App-scoped styling; no external fonts or assets are needed on mobile. */
+:root { --trip-ink:#193d36; --trip-muted:#627870; --trip-line:#dfe8e2; --trip-green:#176651; }
+body, .gradio-container { background:#f5f6f1 !important; }
+.gradio-container { max-width:1280px !important; width:100% !important; box-sizing:border-box !important; margin:auto; padding:clamp(14px,2.5vw,32px) !important; }
+.gradio-container .main { width:100% !important; max-width:none !important; padding:0 !important; }
+.gradio-container .html-container { padding:0 !important; }
+.dark { --trip-ink:#deeee7; --trip-muted:#abc2b7; --trip-line:#365347; --trip-green:#9ed9bb; }
+.dark body, .dark .gradio-container { background:#11271f !important; }
+#trip-header, #trip-hero, #trip-connection, #trip-cards { border:0; background:transparent; padding:0; }
+.trip-nav { display:flex; justify-content:space-between; align-items:center; gap:16px; padding-bottom:22px; border-bottom:1px solid var(--trip-line); }
+.trip-brand { display:flex; align-items:center; gap:12px; color:var(--trip-ink); font-size:20px; font-weight:750; letter-spacing:1px; }
+.trip-brand { white-space:nowrap; }
+.trip-logo { width:38px; height:38px; display:grid; place-items:center; background:#176651; border-radius:12px; color:white; }
+.trip-nav-note { color:var(--trip-muted); font-size:12px; letter-spacing:2px; }
+.trip-hero { padding:14px 0 6px; }
+.trip-eyebrow { font-size:11px; letter-spacing:2px; color:var(--trip-muted); margin-bottom:10px; }
+.trip-hero h1 { color:var(--trip-ink); font-size:clamp(25px,3vw,36px); line-height:1.35; letter-spacing:-.8px; margin:0 0 10px; font-weight:750; }
+.trip-hero p { margin:0; color:var(--trip-muted); font-size:14px; line-height:1.7; }
+.trip-connection { display:flex; align-items:flex-start; gap:9px; color:var(--trip-muted); font-size:12px; line-height:1.7; padding:10px 0 16px; }
+.trip-dot { width:7px; height:7px; flex:none; margin-top:7px; background:#42976c; border-radius:50%; }
+#trip-workspace { gap:24px; align-items:flex-start; }
+#trip-conversation, #trip-results { min-width:0 !important; gap:14px; }
+.trip-section-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:2px 0 0; color:var(--trip-ink); }
+.trip-section-head h2 { font-size:17px; margin:0; font-weight:700; }
+.trip-section-head span { font-size:12px; color:var(--trip-muted); }
+#trip-chat { border:1px solid var(--trip-line); border-radius:20px; background:var(--block-background-fill); box-shadow:0 6px 24px #193d3605; }
+#trip-chat .message { font-size:14px; line-height:1.85; }
+#trip-chat .message p { line-height:1.85; }
+.trip-welcome { text-align:left; max-width:350px; padding:28px; margin:auto; color:var(--trip-ink); }
+.trip-welcome-icon { color:#176651; margin-bottom:18px; }
+.trip-welcome h3 { font-size:22px; margin:0 0 10px; }
+.trip-welcome p { color:var(--trip-muted); font-size:14px; line-height:1.9; margin:0; }
+.trip-welcome-tags { display:flex; flex-wrap:wrap; gap:8px; margin-top:20px; }
+.trip-welcome-tags span { font-size:11px; background:#edf4ee; color:#486557; border-radius:6px; padding:5px 9px; }
+#trip-scenarios { gap:8px; }
+#trip-scenarios button { min-width:100px !important; min-height:42px; font-size:12px; border:1px solid var(--trip-line); background:transparent; color:var(--trip-ink); box-shadow:none; border-radius:10px; }
+#trip-scenarios button:hover { background:#e8f1e9; border-color:#a5c3ae; }
+#trip-composer { border-radius:16px; border:1px solid var(--trip-line); background:var(--block-background-fill); padding:12px; gap:8px; }
+#trip-input { border:0; box-shadow:none; }
+#trip-input textarea { border:0; box-shadow:none; font-size:14px; line-height:1.8; background:transparent; padding:8px; }
+#trip-actions { gap:10px; }
+#trip-submit { border-radius:10px; min-height:44px; background:#176651; color:#fff; border-color:#176651; box-shadow:none; }
+#trip-submit:hover { background:#104d3d; }
+#trip-reset { border-radius:10px; min-height:44px; box-shadow:none; white-space:nowrap; font-size:13px; padding:8px 10px; }
+#trip-status { font-size:12px; color:var(--trip-muted); padding:0 4px; min-height:20px; }
+#trip-status p { margin:0; }
+#trip-preferences, #trip-details { border:1px solid var(--trip-line); border-radius:14px; box-shadow:none; background:var(--block-background-fill); }
+#trip-preferences label, #trip-preferences input { font-size:13px; }
+#trip-preferences .wrap { gap:8px; }
+.trip-empty { border:1px dashed #c5d6c9; border-radius:20px; padding:32px 26px; color:var(--trip-ink); background:linear-gradient(140deg,#ecf3e9,#f7f8f2); min-height:425px; box-sizing:border-box; }
+.trip-empty-art { height:115px; display:flex; align-items:center; justify-content:center; margin-bottom:18px; }
+.trip-empty h3 { font-size:21px; margin:0 0 10px; }
+.trip-empty p { color:var(--trip-muted); font-size:13px; line-height:1.9; margin:0; }
+.trip-empty-steps { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:28px; padding-top:22px; border-top:1px solid #d3dfd1; }
+.trip-empty-steps span { font-size:12px; display:block; color:#537064; }
+.trip-empty-steps b { display:block; font-size:11px; color:#819586; margin-bottom:8px; font-weight:500; }
+.trip-card-grid { display:grid; grid-template-columns:1fr; gap:14px; }
+.trip-card { border:1px solid var(--trip-line); border-radius:18px; padding:20px; background:var(--block-background-fill,white); color:var(--trip-ink); overflow-wrap:anywhere; }
+.trip-card:first-child { border-top:3px solid #438060; }
+.trip-card-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px; }
+.trip-card h3 { margin:0; font-size:15px; line-height:1.6; }
+.trip-badge { border-radius:6px; padding:3px 7px; font-size:10px; background:#eaf3ed; color:#37654e; flex-shrink:0; }
+.trip-card-status { font-size:11px; color:var(--trip-muted); margin-bottom:14px; line-height:1.7; }
+.trip-metrics { display:grid; grid-template-columns:1.2fr 1fr 1fr; gap:8px; padding:0 0 16px; border-bottom:1px solid var(--trip-line); }
+.trip-metrics small { display:block; font-size:10px; color:var(--trip-muted); margin-bottom:7px; }
+.trip-metrics strong { font-size:19px; line-height:1.3; font-weight:650; letter-spacing:-.4px; }
+.trip-metrics .trip-price { white-space:nowrap; }
+.trip-metrics .trip-price { color:var(--trip-green); font-size:25px; }
+.trip-warning { margin:12px 0 0; background:#fcf2df; color:#80571e; font-size:12px; border-radius:8px; padding:9px 11px; line-height:1.7; }
+.trip-timeline { list-style:none; padding:0 0 0 9px; margin:16px 0 0; }
+.trip-timeline li { border-left:1px solid var(--trip-line); padding:0 0 18px 18px; position:relative; font-size:12px; line-height:1.8; }
+.trip-timeline li:last-child { padding-bottom:0; border-left-color:transparent; }
+.trip-timeline li:before { content:''; width:7px; height:7px; border:2px solid #5b8971; border-radius:50%; background:var(--block-background-fill,white); position:absolute; top:5px; left:-6px; }
+.trip-time { font-size:11px; color:var(--trip-muted); font-variant-numeric:tabular-nums; }
+.trip-route { display:block; margin:3px 0; font-size:13px; color:var(--trip-ink); }
+.trip-service { color:var(--trip-muted); }
+.trip-activity { margin-top:6px; padding:6px 9px; background:#f0f4ed; border-radius:6px; color:#48614f; }
+.trip-card details { margin-top:14px; border-top:1px solid var(--trip-line); padding-top:12px; font-size:12px; }
+.trip-card summary { color:var(--trip-green); cursor:pointer; min-height:28px; line-height:28px; }
+.trip-card details ul { padding-left:18px; color:var(--trip-muted); line-height:1.9; }
+.trip-notice { padding:20px; border:1px solid var(--trip-line); background:var(--block-background-fill,white); border-radius:16px; color:var(--trip-ink); }
+.trip-notice h3 { margin:0 0 10px; font-size:16px; }
+.trip-notice p, .trip-notice li { font-size:13px; color:var(--trip-muted); line-height:1.9; }
+.trip-notice ul { padding-left:18px; }
+.trip-footer { color:var(--trip-muted); font-size:11px; line-height:1.8; margin:20px 0 0; text-align:center; }
+.dark .trip-empty { background:linear-gradient(140deg,#1b382a,#172e24); border-color:#476553; }
+.dark .trip-activity, .dark .trip-welcome-tags span, .dark .trip-badge { background:#284d3b; color:#c5e2ce; }
+.dark #trip-scenarios button:hover { background:#284d3b; }
+.dark .trip-warning { background:#413722; color:#f3d39c; }
+.dark .trip-empty-steps span { color:#bfd4c6; }
+.dark .trip-empty-steps b { color:#97b7a5; }
+@media (min-width:1000px) { #trip-results { position:sticky; top:20px; } }
+@media (max-width:760px) {
+ .gradio-container { padding:16px !important; }
+ .trip-nav { padding-bottom:16px; }
+ .trip-nav-note { font-size:10px; letter-spacing:0; }
+ .trip-brand { font-size:18px; }
+ .trip-hero { padding:20px 0 8px; }
+ #trip-workspace { flex-direction:column; gap:22px; }
+ #trip-conversation, #trip-results { width:100%; flex-basis:auto !important; }
+ #trip-chat { height:360px !important; min-height:280px !important; }
+ #trip-scenarios { flex-wrap:wrap; }
+ #trip-scenarios button { flex:1; padding:8px 6px; }
+ .trip-empty { min-height:260px; padding:22px; }
+ .trip-empty-art { height:65px; margin-bottom:12px; }
+ .trip-card { padding:16px; }
+ .trip-metrics strong { font-size:17px; }
+ .trip-metrics .trip-price { font-size:23px; }
+}
+@media (prefers-reduced-motion:reduce) { *, *:before, *:after { scroll-behavior:auto !important; transition:none !important; } }
 ````
 
 ### `scripts/start_mobile.py`
@@ -6139,6 +6469,38 @@ async def test_policy_staleness_and_preference_reset(service, now):
     assert sources[0]["stale"] and "未复核" in answer
     service.repo.save_preferences(Preferences())
     assert service.repo.preferences().excluded_modes == []
+````
+
+### `tests/test_frontend_cards.py`
+
+````python
+"""Presentation must retain planning caveats and escape provider/user content."""
+
+from frontend.cards import render_intelligent, notice
+from src.agent.intelligent import PlanningReport, JourneyOption
+
+
+def test_unknown_cost_and_partial_journey_stay_visible(now):
+    report = PlanningReport(
+        completed_stops=1,
+        total_stops=3,
+        options=[JourneyOption(location="A", ready=now, transport_cents=500, unknown_cost=True)],
+    )
+    html = render_intelligent(report.model_dump(mode="json"))
+    assert "已知交通费用" in html and "暂不能确认满足预算" in html
+    assert "不是完整可执行方案" in html and "1/3" in html
+
+
+def test_missing_routes_do_not_crash_night_card(now):
+    report = PlanningReport(metro_then_taxi=True, options=[JourneyOption(location="A", ready=now)])
+    assert "路线 01" in render_intelligent(report.model_dump(mode="json"))
+
+
+def test_clarification_is_visible_and_provider_text_is_escaped():
+    report = PlanningReport(questions=["<img src=x onerror=alert(1)>几点到？"])
+    html = render_intelligent(report.model_dump(mode="json"))
+    assert "再补充一点" in html and "&lt;img" in html and "<img" not in html
+    assert "&lt;script&gt;" in notice("<script>", ["<script>"])
 ````
 
 ### `tests/test_intelligent.py`
@@ -7894,6 +8256,7 @@ PHASES = {
         "src/risk.py",
         "src/api/*.py",
         "frontend/*.py",
+        "frontend/*.css",
         "scripts/start_mobile.py",
         "mobile/android/AndroidManifest.xml",
         "mobile/android/res/**/*.xml",

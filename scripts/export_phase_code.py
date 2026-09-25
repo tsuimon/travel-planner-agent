@@ -28,6 +28,7 @@ PHASES = {
         "src/risk.py",
         "src/api/*.py",
         "frontend/*.py",
+        "frontend/*.css",
         "scripts/start_mobile.py",
         "mobile/android/AndroidManifest.xml",
         "mobile/android/res/**/*.xml",
