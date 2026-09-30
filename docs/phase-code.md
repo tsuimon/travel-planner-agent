@@ -2603,6 +2603,7 @@ from src.agent.conversation_actions import (
     patch_draft,
 )
 from src.agent.intelligent import IntelligentPlanner, describe_report
+from src.agent.departure_grounding import departure_fact, grounded_patch
 from src.agent.itinerary_parser import explain_draft, missing_fields
 from src.agent.route_probe import describe_probe, probe_route
 from src.domain import ItineraryDraft, ItineraryStop, Preferences
@@ -2662,6 +2663,8 @@ class ConversationAgent:
         history = self.service.repo.history(nodes.sid, 20)
         nodes.itinerary = active_draft(history, self.service.repo.preferences())
         self.history = [{"role": r["role"], "content": r["content"][:280]} for r in history[-6:]]
+        self.user_history = [r["content"] for r in history if r["role"] == "user"]
+        self.time_grounding = None
         self.observation: dict = {}
         self.facts: list[str] = []
         self.actions: list[str] = []
@@ -2686,6 +2689,7 @@ class ConversationAgent:
             "actions": self.actions,
             "preview": self.preview,
             "observation": self.observation,
+            "time_grounding": self.time_grounding,
         }
 
     def finish(self, answer: str, status: str = "ok") -> dict:
@@ -2883,7 +2887,18 @@ class ConversationAgent:
             if action.mode == "new"
             else n.itinerary
         )
-        draft = patch_draft(base, action.patch)
+        users = self.user_history if action.mode != "new" else []
+        reference = base.arrive_by if base.arrival_priority else base.depart_after
+        fact = departure_fact(n.request.message, users, n.now, reference)
+        if fact:
+            self.time_grounding = {
+                "role": "departure",
+                "at": fact.at.isoformat(),
+                "source": fact.source,
+                "period_source": fact.period_source,
+            }
+        supplied = [*users, n.request.message]
+        draft = patch_draft(base, grounded_patch(base, action.patch, fact, supplied, n.now))
         # Check fidelity to the user's words separately from route feasibility.
         reviewed = await self.service.llm.completion(
             {
@@ -2899,6 +2914,8 @@ class ConversationAgent:
                                 "now": n.now.isoformat(),
                                 "user": n.request.message,
                                 "previous": base.model_dump(mode="json", exclude_defaults=True),
+                                "user_history": users[-3:],
+                                "verified_departure": self.time_grounding,
                                 "draft": draft.model_dump(mode="json", exclude_defaults=True),
                             }
                         ),
@@ -2911,7 +2928,7 @@ class ConversationAgent:
             max_tokens=900,
         )
         audit = DraftAudit.model_validate_json(reviewed["choices"][0]["message"]["content"])
-        draft = patch_draft(draft, audit.patch)
+        draft = patch_draft(draft, grounded_patch(draft, audit.patch, fact, supplied, n.now))
         # This is an earliest search boundary, not the user's specified departure.
         if draft.arrive_by and not draft.depart_after:
             draft = patch_draft(draft, {"depart_after": n.now.isoformat(), "arrival_priority": True})
@@ -3003,6 +3020,159 @@ def patch_draft(previous: ItineraryDraft, patch: dict) -> ItineraryDraft:
         else:
             value[key] = item
     return ItineraryDraft.model_validate(value)
+````
+
+### `src/agent/departure_grounding.py`
+
+````python
+"""Ground unambiguous departure clocks; this validates facts, not conversation intent."""
+
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from src.agent.time_roles import STAMP, arrival_match, arrival_time
+from src.agent.time_text import normalize_time_text
+from src.domain import ItineraryDraft, TZ
+from src.errors import NeedsClarification
+
+
+@dataclass(frozen=True)
+class DepartureFact:
+    at: datetime
+    source: str
+    period_source: str | None = None
+
+
+def normalized(text: str) -> str:
+    text = normalize_time_text(text)
+    text = re.sub(
+        r"(\d{4})年(\d{1,2})月(\d{1,2})[日号]",
+        lambda m: f"{int(m[1]):04d}-{int(m[2]):02d}-{int(m[3]):02d}",
+        text,
+    )
+    for short, full in {
+        "今晚": "今天晚上",
+        "今夜": "今天晚上",
+        "明晚": "明天晚上",
+        "今早": "今天早上",
+    }.items():
+        text = text.replace(short, full)
+    return text
+
+
+def stamp_time(match, text: str, now: datetime, inherited: datetime | None = None) -> datetime | None:
+    """A bare twelve-hour clock can inherit period/date only from a user's earlier clock."""
+    hour = int(match["h"])
+    minute = int(match["m"] or (30 if match["zh"] == "半" else (match["zh"] or "0").rstrip("分")))
+    period = match["period"]
+    if not period and hour < 12 and not match["h"].startswith("0"):
+        if inherited is None:
+            return None
+        hour = hour % 12 + (12 if inherited.hour >= 12 else 0)
+    elif period in {"下午", "晚上", "傍晚"} and hour < 12:
+        hour += 12
+    elif period in {"凌晨", "早上", "上午"} and hour == 12:
+        hour = 0
+    day = (inherited or now).astimezone(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    token = match["date"]
+    if not token:
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}|今天|明天|后天", text[: match.start()])
+        token = dates[-1] if dates else None
+    if token:
+        day = now.astimezone(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
+            day = datetime.fromisoformat(token).replace(tzinfo=TZ)
+        else:
+            day += timedelta(days={"今天": 0, "明天": 1, "后天": 2, "次日": 1, "第二天": 1}[token])
+    return day.replace(hour=hour, minute=minute)
+
+
+def departure_fact(
+    query: str, history: list[str], now: datetime, reference: datetime | None = None
+) -> DepartureFact | None:
+    """Recognize clear clock-to-departure bindings, never infer a route or select a tool.
+
+    Ambiguous clocks, negated instructions, ranges and multiple departures remain
+    the model's responsibility to clarify. Only user messages supply AM/PM context.
+    """
+    text = normalized(query)
+    # These calendars need semantic resolution; never replace them with today.
+    if re.search(r"(?:周|星期|礼拜)[一二三四五六日天]|\d{1,2}月|\d{1,2}[日号](?!线)|大后天", text):
+        return None
+    facts = []
+    for match in re.finditer(STAMP, text):
+        before = re.split(r"[，,。；;\n]", text[: match.start()])[-1]
+        after = text[match.end() :]
+        if re.search(r"[-~～—至到]\s*$", before) and re.search(STAMP, before):
+            continue
+        if re.search(r"(?:不是|并非|不要|别按|不要按|取消|不在|最晚|最早|大约|约)\s*$", before):
+            continue
+        if not (
+            re.match(r"\s*(?:出发|动身|启程|走(?:[，,。！!]|$))", after)
+            or re.match(r"\s*从[^，,。；;\n\d]{1,60}?(?:回|去|前往|出发)", after)
+            or re.search(r"(?:出发|动身|启程)(?:时间)?(?:是|为|改为|改成)?\s*$", before)
+        ):
+            continue
+        inherited, period_source = None, None
+        if not match["period"]:
+            for prior in reversed(history):
+                previous = normalized(prior)
+                stamps = list(re.finditer(STAMP, previous))
+                # Multiple different clock roles need semantic disambiguation.
+                for old in reversed(stamps):
+                    if int(old["h"]) % 12 == int(match["h"]) % 12:
+                        inherited = stamp_time(old, previous, now)
+                        if inherited:
+                            if reference:
+                                # The stored trip date is already resolved: do not
+                                # apply “明天” a second time to tomorrow's date.
+                                inherited = inherited.replace(
+                                    year=reference.year, month=reference.month, day=reference.day
+                                )
+                            period_source = prior
+                            break
+                if inherited:
+                    break
+        at = stamp_time(match, text, now, inherited)
+        if at:
+            facts.append(DepartureFact(at, query, period_source))
+    return facts[0] if len(facts) == 1 else None
+
+
+def grounded_patch(
+    base: ItineraryDraft, patch: dict, fact: DepartureFact | None, user_messages: list[str], now: datetime
+) -> dict:
+    """Apply a fixed departure atomically, including its obsolete derived state.
+
+    Keep a genuinely user-specified arrival deadline. Remove the same clock copied
+    into arrive_by by a model when there is no user evidence of an arrival request.
+    """
+    if fact is None:
+        return patch
+    result = dict(patch)
+    result.update(depart_after=fact.at.isoformat(), depart_before=fact.at.isoformat(), arrival_priority=False)
+    deadline = patch.get("arrive_by", base.arrive_by)
+    if isinstance(deadline, str):
+        deadline = datetime.fromisoformat(deadline)
+    departure_deadline = deadline == fact.at
+    if deadline and not departure_deadline:
+        for i, message in enumerate(user_messages[:-1]):
+            old_fact = departure_fact(message, user_messages[:i], now)
+            departure_deadline |= bool(old_fact and old_fact.at == deadline)
+    if departure_deadline:
+        supported = False
+        for message in user_messages:
+            text = normalized(message)
+            found = arrival_match(text)
+            if found:
+                try:
+                    supported |= arrival_time(found, text, now) == deadline
+                except (ValueError, NeedsClarification):
+                    pass
+        if not supported:
+            result["arrive_by"] = None
+    return result
 ````
 
 ### `src/agent/explicit_limits.py`
@@ -3439,6 +3609,9 @@ class IntelligentPlanner:
         return kept[:4]
 
     async def plan(self, draft: ItineraryDraft) -> PlanningReport:
+        # An exact departure cannot be moved by an inherited arrival-search flag.
+        if draft.depart_after and draft.depart_before == draft.depart_after:
+            draft = draft.model_copy(update={"arrival_priority": False})
         r = self.report
         self.preferences = draft.preferences
         self.metro_then_taxi = r.metro_then_taxi = draft.metro_then_taxi
@@ -7314,6 +7487,181 @@ async def test_incomplete_model_draft_without_map_never_enters_solver(model_serv
     result = await model_service.chat(ChatRequest(message="我从北京出发"), now)
     assert result.status == "clarification"
     assert result.metadata["itinerary_draft"]["origin"] == "北京"
+````
+
+### `tests/test_departure_grounding.py`
+
+````python
+"""Regression: user departure evidence wins even if both model passes get it wrong."""
+
+import json
+from datetime import timedelta
+
+import pytest
+from pydantic import SecretStr
+
+from src.agent.departure_grounding import departure_fact, grounded_patch
+from src.agent.intelligent import IntelligentPlanner, PlanningReport
+from src.domain import ChatRequest, ChatResponse, ItineraryDraft, ItineraryStop
+
+
+QUERY = "我要在今晚10:30从鸟巢回北京印刷学院，帮我规划路线"
+
+
+@pytest.mark.parametrize(
+    "query", [QUERY, "今晚十点半从鸟巢回北京印刷学院", "今晚22：30出发", "今晚出发时间是22:30"]
+)
+def test_departure_literal_variants(query, now):
+    fact = departure_fact(query, [], now)
+    # The final variant leaves the period before the named-time phrase, but has
+    # an unambiguous 24-hour clock.
+    assert fact and fact.at == now.replace(hour=22, minute=30)
+
+
+def test_short_correction_inherits_evening_from_user(now):
+    fact = departure_fact("10:30出发", [QUERY], now)
+    assert fact.at.hour == 22 and fact.period_source == QUERY
+    assert departure_fact("10:30出发", [], now) is None
+
+
+def test_tomorrow_is_not_applied_twice_when_inheriting(now):
+    reference = (now + timedelta(days=1)).replace(hour=22, minute=30)
+    fact = departure_fact("10:30出发", ["明晚10:30从鸟巢回学校"], now, reference)
+    assert fact.at == reference
+
+
+@pytest.mark.parametrize(
+    "query", ["周五22:30出发", "10月1日22:30出发", "22:00到22:30出发", "22:00-22:30出发"]
+)
+def test_unresolved_dates_and_time_ranges_stay_with_semantic_parser(query, now):
+    assert departure_fact(query, [], now) is None
+
+
+def test_explicit_calendar_is_not_replaced_with_today(now):
+    fact = departure_fact("2026年10月1日22:30从北京回天津", [], now)
+    assert fact.at == now.replace(year=2026, month=10, day=1, hour=22, minute=30)
+
+
+def test_changed_departure_removes_deadline_wrongly_copied_from_old_departure(now):
+    deadline = now.replace(hour=22, minute=30)
+    base = ItineraryDraft(depart_after=now, arrive_by=deadline, arrival_priority=True)
+    fact = departure_fact("改成23点出发", [QUERY], now)
+    patch = grounded_patch(base, {}, fact, [QUERY, "改成23点出发"], now)
+    assert patch["arrive_by"] is None and patch["arrival_priority"] is False
+    assert patch["depart_after"] == now.replace(hour=23, minute=0).isoformat()
+
+
+@pytest.mark.parametrize(
+    "query", ["不是22:30出发，是23点到", "22:30前出发", "最晚22:30出发", "大约22:30出发", "明天22:30到学校"]
+)
+def test_non_exact_or_arrival_not_overridden(query, now):
+    assert departure_fact(query, [], now) is None
+
+
+def test_real_arrival_deadline_is_not_erased(now):
+    at = now.replace(hour=22, minute=30)
+    fact = departure_fact("22:30出发", [], now)
+    base = ItineraryDraft(depart_after=now, arrive_by=at, arrival_priority=True)
+    patch = grounded_patch(base, {}, fact, ["今天22:30到学校", "22:30出发"], now)
+    assert "arrive_by" not in patch  # Keep the real conflict for validation, not silently clear it.
+    assert patch["arrival_priority"] is False
+
+
+@pytest.mark.parametrize("corrupt_history", [False, True])
+async def test_two_turn_departure_even_when_models_repeat_arrival_error(
+    service, now, monkeypatch, corrupt_history
+):
+    service.settings.conversation_agent = True
+    service.settings.llm_base_url = "https://llm.test/v1"
+    service.settings.llm_model = "test"
+    service.settings.llm_api_key = SecretStr("test")
+    service.settings.amap_api_key = SecretStr("test")
+    sid = service.repo.new_session()
+    departure = now.replace(hour=22, minute=30)
+    planner_inputs = []
+
+    async def completion(body, *args, **kwargs):
+        # BOTH initial extraction and semantic audit deliberately propose the wrong role.
+        patch = {"depart_after": None, "arrive_by": departure.isoformat(), "arrival_priority": True}
+        if body["messages"][0]["content"].startswith("Audit"):
+            value = {"patch": patch}
+        else:
+            value = {
+                "action": "plan",
+                "mode": "update",
+                "patch": {
+                    **patch,
+                    "origin": "鸟巢",
+                    "stops": [{"locations": ["北京印刷学院"], "duration_min": 0}],
+                },
+            }
+        return {"choices": [{"message": {"content": json.dumps(value)}}]}
+
+    async def plan(self, draft):
+        planner_inputs.append(draft)
+        self.report = PlanningReport(
+            departure_at=draft.depart_after,
+            arrival_priority=draft.arrival_priority,
+            arrive_by=draft.arrive_by,
+        )
+        return self.report
+
+    monkeypatch.setattr(service.llm, "completion", completion)
+    monkeypatch.setattr(IntelligentPlanner, "plan", plan)
+    if corrupt_history:
+        # Exactly the state persisted by the faulty production reply: wrong morning
+        # departure AND an invented evening arrival deadline.
+        broken = ItineraryDraft(
+            origin="鸟巢",
+            depart_after=now.replace(hour=10, minute=30),
+            arrive_by=departure,
+            arrival_priority=True,
+            stops=[ItineraryStop(locations=["北京印刷学院"], duration_min=0)],
+        )
+        service.repo.save_turn(
+            QUERY,
+            ChatResponse(
+                session_id=sid,
+                status="degraded",
+                answer="22:30前到达",
+                metadata={"itinerary_draft": broken.model_dump(mode="json")},
+            ),
+        )
+    else:
+        await service.chat(ChatRequest(session_id=sid, message=QUERY), now)
+    result = await service.chat(ChatRequest(session_id=sid, message="10:30出发"), now + timedelta(minutes=1))
+    assert planner_inputs
+    for draft in planner_inputs:
+        assert draft.depart_after == departure and draft.depart_before == departure
+        assert draft.arrive_by is None and not draft.arrival_priority
+    assert "前到达" not in result.answer
+    assert result.metadata["conversation"]["time_grounding"]["period_source"] == QUERY
+
+
+async def test_exact_departure_blocks_reverse_search_even_with_stale_flag(service, now, monkeypatch):
+    draft = ItineraryDraft(
+        origin="起点",
+        depart_after=now,
+        depart_before=now,
+        arrive_by=now + timedelta(hours=3),
+        arrival_priority=True,
+        stops=[ItineraryStop(locations=["终点"], duration_min=0)],
+    )
+    planner = IntelligentPlanner(service.registry, 9999999999)
+    queried = []
+
+    async def forward(origin, destination, at, strategy="1"):
+        queried.append(at)
+        return []
+
+    async def reverse(*args):
+        pytest.fail("Exact departure must never use reverse departure search")
+
+    monkeypatch.setattr(planner, "routes", forward)
+    monkeypatch.setattr(planner, "arrival_routes", reverse)
+    report = await planner.plan(draft)
+    assert queried and all(at == now for at in queried)
+    assert report.arrival_priority is False
 ````
 
 ### `tests/test_e2e.py`

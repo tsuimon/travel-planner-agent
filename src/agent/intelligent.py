@@ -270,6 +270,9 @@ class IntelligentPlanner:
         return kept[:4]
 
     async def plan(self, draft: ItineraryDraft) -> PlanningReport:
+        # An exact departure cannot be moved by an inherited arrival-search flag.
+        if draft.depart_after and draft.depart_before == draft.depart_after:
+            draft = draft.model_copy(update={"arrival_priority": False})
         r = self.report
         self.preferences = draft.preferences
         self.metro_then_taxi = r.metro_then_taxi = draft.metro_then_taxi

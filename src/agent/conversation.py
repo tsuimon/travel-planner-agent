@@ -16,6 +16,7 @@ from src.agent.conversation_actions import (
     patch_draft,
 )
 from src.agent.intelligent import IntelligentPlanner, describe_report
+from src.agent.departure_grounding import departure_fact, grounded_patch
 from src.agent.itinerary_parser import explain_draft, missing_fields
 from src.agent.route_probe import describe_probe, probe_route
 from src.domain import ItineraryDraft, ItineraryStop, Preferences
@@ -75,6 +76,8 @@ class ConversationAgent:
         history = self.service.repo.history(nodes.sid, 20)
         nodes.itinerary = active_draft(history, self.service.repo.preferences())
         self.history = [{"role": r["role"], "content": r["content"][:280]} for r in history[-6:]]
+        self.user_history = [r["content"] for r in history if r["role"] == "user"]
+        self.time_grounding = None
         self.observation: dict = {}
         self.facts: list[str] = []
         self.actions: list[str] = []
@@ -99,6 +102,7 @@ class ConversationAgent:
             "actions": self.actions,
             "preview": self.preview,
             "observation": self.observation,
+            "time_grounding": self.time_grounding,
         }
 
     def finish(self, answer: str, status: str = "ok") -> dict:
@@ -296,7 +300,18 @@ class ConversationAgent:
             if action.mode == "new"
             else n.itinerary
         )
-        draft = patch_draft(base, action.patch)
+        users = self.user_history if action.mode != "new" else []
+        reference = base.arrive_by if base.arrival_priority else base.depart_after
+        fact = departure_fact(n.request.message, users, n.now, reference)
+        if fact:
+            self.time_grounding = {
+                "role": "departure",
+                "at": fact.at.isoformat(),
+                "source": fact.source,
+                "period_source": fact.period_source,
+            }
+        supplied = [*users, n.request.message]
+        draft = patch_draft(base, grounded_patch(base, action.patch, fact, supplied, n.now))
         # Check fidelity to the user's words separately from route feasibility.
         reviewed = await self.service.llm.completion(
             {
@@ -312,6 +327,8 @@ class ConversationAgent:
                                 "now": n.now.isoformat(),
                                 "user": n.request.message,
                                 "previous": base.model_dump(mode="json", exclude_defaults=True),
+                                "user_history": users[-3:],
+                                "verified_departure": self.time_grounding,
                                 "draft": draft.model_dump(mode="json", exclude_defaults=True),
                             }
                         ),
@@ -324,7 +341,7 @@ class ConversationAgent:
             max_tokens=900,
         )
         audit = DraftAudit.model_validate_json(reviewed["choices"][0]["message"]["content"])
-        draft = patch_draft(draft, audit.patch)
+        draft = patch_draft(draft, grounded_patch(draft, audit.patch, fact, supplied, n.now))
         # This is an earliest search boundary, not the user's specified departure.
         if draft.arrive_by and not draft.depart_after:
             draft = patch_draft(draft, {"depart_after": n.now.isoformat(), "arrival_priority": True})
